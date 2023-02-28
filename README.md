@@ -12,8 +12,10 @@ Responses are cached for faster response times, the browser history state is han
 Installation
 Start with creating an index.html file and include spaux.js with:
 
+```js
 <!-- include spaux.js -->
 <script src="//cdn.jsdelivr.net/gh/automazeio/spauxjs/spaux.min.js"></script>
+```
 
 ### That's it!
 
