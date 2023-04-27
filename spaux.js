@@ -1,4 +1,19 @@
+/* jshint esversion: 9 */
 (function (spaux, undefined) {
+
+  const postfetchEvent = (eventInfo) => {
+    const targetElement = document.querySelector(eventInfo.detail.target);
+    // targetElement.setAttribute('aria-busy', false);
+    targetElement.removeAttribute('aria-label');
+
+    targetElement.classList.remove('spaux-in');
+    targetElement.classList.add('spaux-out');
+    window.dispatchEvent(new CustomEvent("spaux:postfetch", eventInfo));
+
+    document.head.querySelectorAll('.spaux-remove').forEach(element => {
+      element.remove();
+    });
+  };
 
   /**
    * It fetches a URL, replaces the contents of a target element with the response,
@@ -10,55 +25,67 @@
    *  - method {string}  [get] - the HTTP method to use
    *  - callback {string} - a function to call after the content is placed
    */
-  const fetchToFrame = (url, target, append = false, { method = 'get', callback } = {}) => {
+  spaux.isFetching = false;
+  spaux.fetchToFrame = (url, target, { append = false, method = 'get', callback } = {}) => {
     url = new URL(url, document.location.href).href;
 
     const targetSelector = target === ':root' ? ':root' : `#${target}`;
     const targetElement = document.querySelector(targetSelector);
-    targetElement.setAttribute('aria-busy', true);
+    // targetElement.setAttribute('aria-busy', true);
     targetElement.setAttribute('aria-label', 'Loading...');
 
-    const postFetch = () => {
-      if (callback) callback();
+    const postFetchCallback = () => {
+      if (callback) {
+        setTimeout(callback, 500);
+      }
       attachEvents();
     };
 
     const eventInfo = { detail: { url, method, target: targetSelector } };
+
+    document.querySelector(eventInfo.detail.target).classList.remove('spaux-out');
+    document.querySelector(eventInfo.detail.target).classList.add('spaux-in');
     window.dispatchEvent(new CustomEvent("spaux:prefetch", eventInfo));
+
+    if (spaux.isFetching) { return; }
+    spaux.isFetching = true;
 
     fetch(url, { method: method })
       .then((response) => response.text())
       .then((html) => {
         html = html.replace(/(\s|\n)(const|let) /gmi, ' var ');
-
-        // replace the whole document?
-        if (target === ':root') {
-          spaux.placeHTML(html, ':root').then(postFetch);
-          document.querySelector(':root').setAttribute('aria-busy', false);
-          document.querySelector(':root').removeAttribute('aria-label');
-          window.dispatchEvent(new CustomEvent("spaux:postfetch", eventInfo));
-          return;
-        }
-
         // check that the target exists
         if (!targetElement) {
           console.error(`target ${target} not found`);
           return;
         }
 
-        // replace the <head>
-        if (!append && url !== document.location.href) {
+        // replace the <head> but keep styles until the end
+        if (target === ':root' || (!append && url !== document.location.href)) {
           const headRegex = /<head>((.|\n)*)<\/head>/gmi;
           let m = headRegex.exec(html);
           if (m !== null) {
-            spaux.placeHTML(m[1].trim(), 'head').then(() => {
-              // console.info('head replaced');
-            });
+            _loadContent(_htmlToElements(m[1]), 0, document.head, false);
           }
         }
 
+        // replace the whole document?
+        if (target === ':root') {
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          document.body.innerHTML = '';
+          document.body.className = '';
+          setTimeout(() =>{
+            document.body.className = doc.body.className;
+            document.body.innerHTML = doc.body.innerHTML;
+            postFetchCallback();
+            postfetchEvent(eventInfo);
+          }, 150);
+          return;
+        }
+
         // replace the target
-        let contentRegex = new RegExp(`<(\\w+) id="${target}">((.|\\n)*)`, 'gmi')
+        // let contentRegex = new RegExp(`<(\\w+) id="${target}">((.|\\n)*)`, 'gmi');
+        let contentRegex = new RegExp(`<(\\w+)(.*?) id="${target}"(.*?)>((.|\\n)*)`, 'gmi');
         m = contentRegex.exec(html);
         if (m === null) {
           // use body or all content if no body found
@@ -67,21 +94,23 @@
           if (m !== null) html = m[0];
         } else {
           const tag = m[1];
-          contentRegex = new RegExp(`^(<${tag} id="${target}">((.|\\n)*)</${tag}>)|</${tag}>$`, 'gmi');
+          contentRegex = new RegExp(`^(<${tag}(.*?) id="${target}"(.*?)>((.|\\n)*)</${tag}>)|</${tag}>$`, 'gmi');
           m = contentRegex.exec(m[0]);
           html = `${m.slice(-2)[0]}`.split(`</${tag}>`).slice(0, -1).join(`</${tag}>`);
         }
-
-        spaux.placeHTML(html, targetSelector, append).then(postFetch);
-        targetElement.setAttribute('aria-busy', false);
-        targetElement.removeAttribute('aria-label');
-        window.dispatchEvent(new CustomEvent("spaux:postfetch", eventInfo));
+        setTimeout(() =>{
+          spaux.placeHTML(html, targetSelector, append).then(postFetchCallback);
+          postfetchEvent(eventInfo);
+        }, 200);
       }).catch((error) => {
         // alert(error);
         console.log(error);
-        targetElement.setAttribute('aria-busy', false);
-        targetElement.removeAttribute('aria-label');
-        window.dispatchEvent(new CustomEvent("spaux:postfetch", eventInfo));
+        postfetchEvent(eventInfo);
+      })
+      .finally(() => {
+        setTimeout(() => {
+          spaux.isFetching = false;
+        }, 300);
       });
   };
 
@@ -94,13 +123,38 @@
    */
   const onClick = (event) => {
     event.preventDefault();
-    const el = event.target;
+    let el = event.target;
+
+    // loop until you find the href
+    while (el && !el.hasAttribute('href')) {
+      el = el.parentNode;
+      if (el.nodeName == 'BODY') return;
+    }
     const target = el.getAttribute('data-spaux-target') || ':root';
     const method = el.getAttribute('data-spaux-method') || 'get';
     const append = el.hasAttribute('data-spaux-append') && el.getAttribute('data-spaux-append') !== 'false';
     const render = !el.hasAttribute('data-spaux-render') || el.getAttribute('data-spaux-render') !== 'false';
     const cache = !el.hasAttribute('data-spaux-cache') || el.getAttribute('data-spaux-cache') !== 'false';
     const url = new URL(el.getAttribute('href'), document.location.href).href;
+
+    if (el.target && el.target !== '_self') {
+      window.open(url, el.target);
+      return;
+    }
+    // ----------------------------------------
+    // find the target container to attach an "active" class
+    try {
+      let parent = el;
+      while (parent && (parent.nodeName == 'A' || parent.nodeName == 'LI')) {
+        parent = parent.parentNode;
+        if (parent.nodeName == 'BODY') break;
+      }
+      parent.querySelectorAll('a').forEach(element => {
+        element.classList.remove('spaux-active');
+      });
+      el.classList.add('spaux-active');
+    } catch (err) { }
+    // ----------------------------------------
 
     // ping only
     if (!render) {
@@ -126,8 +180,10 @@
       scrollX: window.scrollX,
     };
 
-    fetchToFrame(url, target, append, {
-      method: method, callback: () => {
+    spaux.fetchToFrame(url, target, {
+      append: append,
+      method: method,
+      callback: () => {
         const changeInterval = setInterval(() => {
           if (targetSelector.innerHTML !== '' && state.html !== targetSelector.innerHTML.trim()) {
             clearInterval(changeInterval);
@@ -189,6 +245,10 @@
    */
   spaux.remoteResources = [];
 
+  setInterval(() => {
+    spaux.remoteResources = [];
+  }, 300 * 1000);
+
   /**
    * It takes a string of HTML and returns an array of DOM nodes
    * @param {string} html the HTML/Javascript returned by fetch()
@@ -211,6 +271,7 @@
         }
       }
     }
+
     return nodesArray.concat(scriptsArray);
   };
 
@@ -225,7 +286,17 @@
    */
   const _loadContent = function (data, index, container, appendData) {
     if (index === 0 && !appendData) {
-      document.querySelector(container).innerHTML = '';
+      if (container === document.head) {
+        // remove all head items except form styles...
+        document.head.querySelectorAll('link[rel="stylesheet"], style').forEach(element => {
+          element.classList.add('spaux-remove'); // mark for deletion later
+        });
+        document.head.querySelectorAll(':not(link[rel="stylesheet"]):not(style)').forEach(element => {
+          element.remove();
+        });
+      } else {
+        document.querySelector(container).innerHTML = '';
+      }
     }
     var item, minified;
     if (index <= data.length) {
@@ -240,23 +311,21 @@
           item.setAttribute(attr.nodeName, attr.nodeValue);
         });
         if (element.src != '') {
-          // if (spaux.remoteResources.includes(element.src) === false) {
-          spaux.remoteResources.push(element.src);
-          item.src = element.src;
-          item.onload = function () {
-            _loadContent(data, index + 1, container);
-          };
-          document.head.appendChild(item);
-          // } else {
-          // _loadContent(data, index + 1, container);
-          // }
+          if (spaux.remoteResources.includes(element.src) === false) {
+            spaux.remoteResources.push(element.src);
+            item.src = element.src;
+            item.onload = function () {
+              _loadContent(data, index + 1, container);
+            };
+            document.head.appendChild(item);
+          }
         } else {
           minified = element.text.replace(/[^a-z0-9]/gim, '');
-          // if (spaux.remoteResources.includes(minified) === false) {
-          spaux.remoteResources.push(minified);
-          item.text = element.text;
-          document.body.appendChild(item);
-          // }
+          if (spaux.remoteResources.includes(minified) === false) {
+            spaux.remoteResources.push(minified);
+            item.text = element.text;
+            if (document.body) document.body.appendChild(item);
+          }
           _loadContent(data, index + 1, container);
         }
       }
@@ -276,6 +345,7 @@
           item.onload = function () {
             _loadContent(data, index + 1, container);
           };
+          item.classList.remove('x-spaux-remove');
           document.head.appendChild(item);
         } else {
           _loadContent(data, index + 1, container);
@@ -284,7 +354,11 @@
 
       else {
         if (element !== undefined) {
-          document.querySelector(container).appendChild(element);
+          if (container === document.head) {
+            document.head.appendChild(element);
+          } else {
+            document.querySelector(container).appendChild(element);
+          }
         }
         _loadContent(data, index + 1, container);
       }
@@ -303,7 +377,9 @@
    */
   const attachEvents = (element) => {
     element = element || document;
-
+    if (typeof element === 'string') {
+      element = document.querySelector(element);
+    }
     // const match = `a:not([data-spaux-disable]):not([href*="//${window.location.host}"])`;
     element.querySelectorAll('a:not([data-spaux-disable])').forEach((el) => {
       el.removeEventListener('click', onClick);
@@ -347,8 +423,10 @@
             document.title = event.state.title;
           });
         } else {
-          fetchToFrame(event.state.url, event.state.target, false, {
-            method: event.state.method, callback: () => {
+          spaux.fetchToFrame(event.state.url, event.state.target, {
+            append: false,
+            method: event.state.method,
+            callback: () => {
               window.scrollTo(event.state.scrollX, event.state.scrollY);
               document.title = event.state.title;
             }
